@@ -184,7 +184,15 @@ const EmployeeSchema = new mongoose.Schema(
       type: Date,
     },
 
+    probationStartDate: {
+      type: Date,
+    },
+
     noticePeriodEndDate: {
+      type: Date,
+    },
+
+    noticeStartDate: {
       type: Date,
     },
 

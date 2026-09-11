@@ -3,9 +3,74 @@ const { port } = require("../config/db");
 const baseUrl = port.replace(/\/api\/?$/, "");
 const axios = require("axios");
 
+const getWorkingDaysCount = (startDate, endDate) => {
+  let count = 0;
+  let cur = new Date(startDate);
+  const end = new Date(endDate);
+  
+  const holidays = [
+    "01-01", // New Year
+    "01-26", // Republic Day
+    "05-01", // May Day
+    "08-15", // Independence Day
+    "10-02", // Gandhi Jayanti
+    "12-25", // Christmas
+  ];
+
+  while (cur <= end) {
+    const day = cur.getDay();
+    if (day !== 0 && day !== 6) {
+      const monthStr = String(cur.getMonth() + 1).padStart(2, "0");
+      const dateStr = String(cur.getDate()).padStart(2, "0");
+      const mmdd = `${monthStr}-${dateStr}`;
+      if (!holidays.includes(mmdd)) {
+        count++;
+      }
+    }
+    cur.setDate(cur.getDate() + 1);
+  }
+  return count;
+};
+
+const checkAndTransitionEmployee = async (emp) => {
+  let updated = false;
+  const today = new Date();
+  let employeeType = emp.employeeType || "Onboarding";
+  let status = emp.status || "Active";
+
+  if (employeeType === "Probation Period" && emp.dateOfJoining) {
+    const completed = getWorkingDaysCount(emp.dateOfJoining, today);
+    if (completed >= 45) {
+      employeeType = "Permanent";
+      updated = true;
+    }
+  }
+
+  if (employeeType === "Notice Period" && emp.noticeStartDate) {
+    const diffTime = Math.abs(today - new Date(emp.noticeStartDate));
+    const completed = Math.floor(diffTime / (1000 * 60 * 60 * 24));
+    if (completed >= 30) {
+      employeeType = "Permanent";
+      status = "Resigned";
+      updated = true;
+    }
+  }
+
+  if (updated) {
+    await Employee.findByIdAndUpdate(emp._id || emp.id, {
+      employeeType,
+      status
+    });
+  }
+};
+
 const getAllEmployees = async (req, res) => {
   try {
-    const employees = await Employee.find({ isDeleted: { $ne: true } });
+    let employees = await Employee.find({ isDeleted: { $ne: true } });
+    for (let emp of employees) {
+      await checkAndTransitionEmployee(emp);
+    }
+    employees = await Employee.find({ isDeleted: { $ne: true } });
     res.json(employees);
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -24,7 +89,10 @@ const getEmployeeById = async (req, res) => {
       return res.status(404).json({ message: "Employee not found" });
     }
 
-    const employeeData = employee.toObject ? employee.toObject() : employee;
+    await checkAndTransitionEmployee(employee);
+    const updatedEmployee = await Employee.findOne(query);
+
+    const employeeData = updatedEmployee.toObject ? updatedEmployee.toObject() : updatedEmployee;
     res.json(employeeData);
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -152,12 +220,48 @@ const loginController = async (req, res) => {
   }
 };
 
+
+const deleteFaceVector = async (req, res) => {
+  try {
+    const isObjectId = String(req.params.id).match(/^[0-9a-fA-F]{24}$/);
+    const query = isObjectId
+      ? { _id: req.params.id }
+      : { employeeId: req.params.id };
+
+    const employee = await Employee.findOneAndUpdate(
+      query,
+      {
+        $set: {
+          faceVector: [],
+          faceVectorUpdatedAt: null,
+          faceCaptureStatus: "not_started",
+        },
+      },
+      { new: true }
+    );
+
+    if (!employee) {
+      return res.status(404).json({ message: "Employee not found" });
+    }
+
+    res.json({
+      success: true,
+      message: "Face vector deleted successfully",
+      employee,
+    });
+  } catch (error) {
+    console.error("deleteFaceVector error:", error);
+    res.status(500).json({ error: error.message });
+  }
+};
+
 module.exports = {
   getAllEmployees,
   getEmployeeById,
   createEmployee,
   updateEmployee,
   deleteEmployee,
+  deleteFaceVector,
   loginController,
   trainFace,
   getAllFacioEmployees,

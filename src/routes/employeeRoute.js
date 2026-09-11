@@ -6,6 +6,7 @@ const {
   createEmployee,
   updateEmployee,
   deleteEmployee,
+  deleteFaceVector,
   loginController,
   trainFace,
   getAllFacioEmployees,
@@ -23,6 +24,8 @@ router.post("/face/train", uploadTrain, trainFace);
 
 router.get("/", getAllEmployees);
 router.get("/facio/get-all", getAllFacioEmployees);
+router.delete("/:id/face-vector", deleteFaceVector);
+router.delete("/:id/face", deleteFaceVector);
 router.get("/:id", getEmployeeById);
 router.post("/", uploadProfileImages, createEmployee);
 router.put("/:id", uploadProfileImages, updateEmployee);
