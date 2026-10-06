@@ -39,6 +39,10 @@ const getSystemAlerts = async (req, res) => {
     const startOfToday = new Date(today.getFullYear(), today.getMonth(), today.getDate());
     const endOfToday = new Date(today.getFullYear(), today.getMonth(), today.getDate(), 23, 59, 59);
 
+    // Skip missing-attendance alerts on Sundays (not a working day)
+    const todayDayOfWeek = today.getDay(); // 0 = Sunday
+    const isTodayWorkingDay = todayDayOfWeek !== 0;
+
     const employees = await Employee.find({ isDeleted: { $ne: true }, status: "Active" });
 
     const probationAlerts = [];
@@ -46,11 +50,16 @@ const getSystemAlerts = async (req, res) => {
     const birthdayAlerts = [];
     const missingAttendance = [];
 
-    // Check attendance for today
+    // Check attendance for today — collect BOTH employeeId strings and _id strings
+    // so the comparison works regardless of which ID format the attendance record stores
     const todaysAttendance = await Attendance.find({
       date: { $gte: startOfToday, $lte: endOfToday }
     });
-    const checkedInEmpIds = todaysAttendance.map(a => a.employee_ID);
+    const checkedInEmpIds = new Set(
+      todaysAttendance.flatMap(a => [
+        a.employee_ID ? String(a.employee_ID) : null
+      ]).filter(Boolean)
+    );
 
     employees.forEach((emp) => {
       // 1. Probation Alerts
@@ -100,12 +109,19 @@ const getSystemAlerts = async (req, res) => {
         }
       }
 
-      // 5. Missing Attendance Records
-      if (!checkedInEmpIds.includes(emp.employeeId)) {
-        missingAttendance.push({
-          employeeId: emp.employeeId,
-          name: `${emp.firstName} ${emp.lastName || ""}`.trim(),
-        });
+      // 5. Missing Attendance Records (only on working days)
+      if (isTodayWorkingDay) {
+        const empIdStr = emp.employeeId ? String(emp.employeeId) : null;
+        const empMongoId = emp._id ? String(emp._id) : null;
+        const isCheckedIn =
+          (empIdStr && checkedInEmpIds.has(empIdStr)) ||
+          (empMongoId && checkedInEmpIds.has(empMongoId));
+        if (!isCheckedIn) {
+          missingAttendance.push({
+            employeeId: emp.employeeId,
+            name: `${emp.firstName} ${emp.lastName || ""}`.trim(),
+          });
+        }
       }
     });
 

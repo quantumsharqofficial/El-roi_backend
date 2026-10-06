@@ -1,7 +1,10 @@
 const Employee = require("../models/employeeModel");
-const { port } = require("../config/db");
-const baseUrl = port.replace(/\/api\/?$/, "");
 const axios = require("axios");
+
+// Build base URL for serving local static files
+const SERVER_PORT = process.env.PORT || 5205;
+// const SERVER_BASE_URL = `http://localhost:${SERVER_PORT}`;
+const SERVER_BASE_URL = `https://elroi.qsisphysio.com/api`;
 
 const getWorkingDaysCount = (startDate, endDate) => {
   let count = 0;
@@ -47,8 +50,7 @@ const checkAndTransitionEmployee = async (emp) => {
   }
 
   if (employeeType === "Notice Period" && emp.noticeStartDate) {
-    const diffTime = Math.abs(today - new Date(emp.noticeStartDate));
-    const completed = Math.floor(diffTime / (1000 * 60 * 60 * 24));
+    const completed = getWorkingDaysCount(new Date(emp.noticeStartDate), today);
     if (completed >= 30) {
       employeeType = "Permanent";
       status = "Resigned";
@@ -106,6 +108,7 @@ const parseJSONFields = (body) => {
     "workExperience",
     "education",
     "bankDetails",
+    "leaveBalances",
   ];
   fields.forEach((field) => {
     if (body[field] && typeof body[field] === "string") {
@@ -118,15 +121,36 @@ const parseJSONFields = (body) => {
   });
 };
 
+// Strip empty string values for Date fields so Mongoose doesn't throw CastError
+const sanitizeDateFields = (body) => {
+  if (!body) return;
+  const dateFields = [
+    "dob",
+    "dateOfJoining",
+    "probationStartDate",
+    "probationEndDate",
+    "noticeStartDate",
+    "noticePeriodEndDate",
+  ];
+  dateFields.forEach((field) => {
+    if (body[field] === "" || body[field] === null) {
+      delete body[field];
+    }
+  });
+};
+
+
 const createEmployee = async (req, res) => {
   try {
-    const profilePhoto = req.file
-      ? `${port}/images/EmployeeProfile/${req.file.filename}`
-      : null;
-    if (profilePhoto) {
-      req.body.profilePhoto = profilePhoto;
+    if (req.file) {
+      // Real file uploaded via multer — build serving URL
+      req.body.profilePhoto = `${SERVER_BASE_URL}/images/EmployeeProfile/${req.file.filename}`;
+    } else if (req.body.profilePhoto && req.body.profilePhoto.startsWith("data:")) {
+      // Strip base64 data URLs — we only store real file URLs
+      delete req.body.profilePhoto;
     }
     parseJSONFields(req.body);
+    sanitizeDateFields(req.body);
     const employee = await Employee.create(req.body);
     res.status(201).json(employee);
   } catch (error) {
@@ -137,13 +161,15 @@ const createEmployee = async (req, res) => {
 
 const updateEmployee = async (req, res) => {
   try {
-    const profilePhoto = req.file
-      ? `${port}/images/EmployeeProfile/${req.file.filename}`
-      : null;
-    if (profilePhoto) {
-      req.body.profilePhoto = profilePhoto;
+    if (req.file) {
+      // Real file uploaded via multer — build serving URL
+      req.body.profilePhoto = `${SERVER_BASE_URL}/images/EmployeeProfile/${req.file.filename}`;
+    } else if (req.body.profilePhoto && req.body.profilePhoto.startsWith("data:")) {
+      // Strip base64 data URLs — don't overwrite existing photo with base64
+      delete req.body.profilePhoto;
     }
     parseJSONFields(req.body);
+    sanitizeDateFields(req.body);
     const isObjectId = req.params.id.match(/^[0-9a-fA-F]{24}$/);
     const query = isObjectId
       ? { _id: req.params.id }

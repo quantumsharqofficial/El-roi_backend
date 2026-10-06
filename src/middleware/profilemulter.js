@@ -1,13 +1,6 @@
-import multer from "multer";
-import path from "path";
-import fs from "fs";
-import { fileURLToPath } from "url";
-import { dirname } from "path";
-import { sendResponse } from "../config/response.js";
-import { CODES } from "../config/response-code.js";
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
+const multer = require("multer");
+const path = require("path");
+const fs = require("fs");
 
 // Ensure the upload directory exists
 const ensureDirExists = (dir) => {
@@ -20,16 +13,13 @@ const uploadDir = path.join(__dirname, "../../Images/EmployeeProfile");
 
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
-    let customUploadDir = uploadDir;
-
-    // Ensure the directory exists
-    ensureDirExists(customUploadDir);
-    cb(null, customUploadDir);
+    ensureDirExists(uploadDir);
+    cb(null, uploadDir);
   },
   filename: (req, file, cb) => {
-    const name = req.body.name ? req.body.name.replace(/\s+/g, "_") : "default";
-    const uniqueSuffix = `${file.originalname}`;
-    cb(null, uniqueSuffix);
+    const uniqueSuffix = Date.now() + "-" + Math.round(Math.random() * 1e9);
+    const ext = path.extname(file.originalname);
+    cb(null, "profile-" + uniqueSuffix + ext);
   },
 });
 
@@ -45,34 +35,24 @@ const fileFilter = (req, file, cb) => {
   }
 };
 
-// Updated to handle single file upload
 const upload = multer({
   storage,
-  limits: { fileSize: 200 * 1024 * 1024 },
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10 MB
   fileFilter,
 }).single("profilePhoto");
 
-export const uploadProfileImages = (req, res, next) => {
-  upload(req, res, (err) => {
-    if (err) {
-      return res
-        .status(500)
-        .json(sendResponse(CODES.INTERNAL_SERVER_ERROR, err.message));
-    }
-   
-    next(); 
-  });
+const uploadProfileImages = (req, res, next) => {
+  const contentType = (req.headers["content-type"] || "").toLowerCase();
+  if (contentType.includes("multipart/form-data")) {
+    upload(req, res, (err) => {
+      if (err) {
+        return res.status(500).json({ error: err.message });
+      }
+      next();
+    });
+  } else {
+    next();
+  }
 };
 
-/*
-=== MIGRATION EXPLANATION ===
-What changed:
-- Converted imports and exports to ES Modules format.
-- Resolved `__dirname` using `import.meta.url`.
-
-Why it changed:
-- Required for ES Modules.
-
-MongoDB-specific considerations:
-- None.
-*/
+module.exports = { uploadProfileImages };
