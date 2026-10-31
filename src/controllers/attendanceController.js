@@ -2,6 +2,8 @@ const mongoose = require("mongoose");
 const Attendance = require("../models/attendanceModel");
 const Employee = require("../models/employeeModel");
 const Leave = require("../models/leaveModel");
+const NewAttendance = require("../models/newAttendaceModel");
+const HomeVisit = require("../models/homeVisitModel");
 
 // ─── IST Helpers ─────────────────────────────────────────────────────────────
 
@@ -20,6 +22,36 @@ const getISTDateString = (date = new Date()) => {
   return date.toLocaleDateString("en-CA", {
     timeZone: "Asia/Kolkata",
   });
+};
+
+// Get start and end Date objects covering the full day in IST
+const formatTimeIST = (timeVal) => {
+  if (!timeVal || timeVal === "N/A" || timeVal === "Present" || timeVal === "--:--") return timeVal || "--:--";
+  if (timeVal instanceof Date || (typeof timeVal === "string" && (timeVal.includes("T") || timeVal.includes("Z")))) {
+    const d = new Date(timeVal);
+    if (!isNaN(d.getTime())) {
+      return d.toLocaleTimeString("en-US", {
+        timeZone: "Asia/Kolkata",
+        hour: "2-digit",
+        minute: "2-digit",
+        hour12: true,
+      });
+    }
+  }
+  if (typeof timeVal === "string") {
+    const trimmed = timeVal.trim();
+    if (/am|pm/i.test(trimmed)) return trimmed;
+    const match = trimmed.match(/^(\d{1,2}):(\d{2})(?::\d{2})?$/);
+    if (match) {
+      let hrs = parseInt(match[1], 10);
+      const mins = match[2];
+      const period = hrs >= 12 ? "PM" : "AM";
+      hrs = hrs % 12;
+      if (hrs === 0) hrs = 12;
+      return `${hrs.toString().padStart(2, "0")}:${mins} ${period}`;
+    }
+  }
+  return timeVal;
 };
 
 // Get start and end Date objects covering the full day in IST
@@ -388,10 +420,16 @@ const getMonthlyAttendanceSummary = async (req, res) => {
       : {};
     const employees = await Employee.find(empQuery);
 
-    const empIds = employees.map((e) => e.employeeId);
+    const empIds = [];
+    employees.forEach(e => {
+      if (e.employeeId) empIds.push(e.employeeId);
+      if (e._id) empIds.push(e._id.toString());
+      if (e.id) empIds.push(e.id.toString());
+    });
     if (employeeId && !empIds.includes(employeeId)) {
       empIds.push(employeeId);
     }
+    const uniqueEmpIds = [...new Set(empIds)];
 
     // Comprehensive date range covering IST and UTC borders
     const startOfMonthUTC = new Date(`${targetMonth}-01T00:00:00.000Z`);
@@ -399,41 +437,65 @@ const getMonthlyAttendanceSummary = async (req, res) => {
     const endOfMonthUTC = new Date(`${targetMonth}-${daysInMonth.toString().padStart(2, "0")}T23:59:59.999Z`);
     const endRange = endOfMonth > endOfMonthUTC ? endOfMonth : endOfMonthUTC;
 
-    // Fetch all attendance logs for this month
-    const attendanceLogs = await Attendance.find({
-      employee_ID: { $in: empIds },
-      $or: [
-        { date: { $gte: startRange, $lte: endRange } },
-        { createdAt: { $gte: startRange, $lte: endRange } },
-      ],
-    }).sort({ date: 1, createdAt: 1 });
-
-    // Fetch all approved leaves for this month
-    const leaves = await Leave.find({
-      status: "Approved",
-      $or: [
-        { startDate: { $lte: endOfMonth }, endDate: { $gte: startOfMonth } },
-      ],
-    });
+    // Fetch new attendance logs, old logs, leaves, and home visits in parallel
+    const [newLogs, oldLogs, leaves, homeVisitRecords] = await Promise.all([
+      NewAttendance.find({
+        employee_ID: { $in: uniqueEmpIds },
+        $or: [
+          { date: { $gte: startRange, $lte: endRange } },
+          { createdAt: { $gte: startRange, $lte: endRange } },
+        ],
+      }).sort({ date: 1, createdAt: 1 }),
+      Attendance.find({
+        employee_ID: { $in: uniqueEmpIds },
+        $or: [
+          { date: { $gte: startRange, $lte: endRange } },
+          { createdAt: { $gte: startRange, $lte: endRange } },
+        ],
+      }).sort({ date: 1, createdAt: 1 }),
+      Leave.find({
+        status: "Approved",
+        $or: [
+          { startDate: { $lte: endOfMonth }, endDate: { $gte: startOfMonth } },
+        ],
+      }),
+      HomeVisit.find({
+        $or: [
+          { date: { $gte: startRange, $lte: endRange } },
+          { createdAt: { $gte: startRange, $lte: endRange } },
+        ],
+      }),
+    ]);
 
     const SHIFT_MINUTES = 480; // 8 hours standard shift
-
     const todayIST = getISTDateString();
 
     const employeeSummaries = employees.map((emp) => {
-      const logsForEmp = attendanceLogs.filter(
-        (log) => log.employee_ID === emp.employeeId
-      );
+      const matchIds = [
+        emp.employeeId,
+        emp._id ? emp._id.toString() : null,
+        emp.id ? emp.id.toString() : null,
+      ].filter(Boolean);
 
-      // Group logs by date in IST (YYYY-MM-DD)
-      const dayMap = {};
-      logsForEmp.forEach((log) => {
+      const empNewLogs = newLogs.filter((log) => matchIds.includes(log.employee_ID));
+      const empOldLogs = oldLogs.filter((log) => matchIds.includes(log.employee_ID));
+
+      // Group new attendance logs by date in IST (YYYY-MM-DD)
+      const newDayMap = {};
+      empNewLogs.forEach((log) => {
         const rawDate = log.date || log.createdAt;
         const dateKey = getISTDateString(new Date(rawDate));
-        if (!dayMap[dateKey]) {
-          dayMap[dateKey] = [];
-        }
-        dayMap[dateKey].push(log);
+        if (!newDayMap[dateKey]) newDayMap[dateKey] = [];
+        newDayMap[dateKey].push(log);
+      });
+
+      // Group old attendance logs by date in IST (YYYY-MM-DD)
+      const oldDayMap = {};
+      empOldLogs.forEach((log) => {
+        const rawDate = log.date || log.createdAt;
+        const dateKey = getISTDateString(new Date(rawDate));
+        if (!oldDayMap[dateKey]) oldDayMap[dateKey] = [];
+        oldDayMap[dateKey].push(log);
       });
 
       // Fetch leaves for this employee
@@ -444,12 +506,17 @@ const getMonthlyAttendanceSummary = async (req, res) => {
       );
 
       let presentDays = 0;
-      let lateDays = 0;
-      let halfDays = 0;
+      let morningLateDays = 0;
+      let earlyCheckOutDays = 0;
       let absentDays = 0;
       let onLeaveDays = 0;
+      let homeVisitCount = 0;
+      const homeVisits = [];
+
       let totalWorkedMinutes = 0;
       let totalOtMinutes = 0;
+      let totalFirstWorkHours = 0;
+      let totalSecondWorkHours = 0;
 
       const dailyBreakdown = [];
 
@@ -457,10 +524,12 @@ const getMonthlyAttendanceSummary = async (req, res) => {
       for (let day = 1; day <= daysInMonth; day++) {
         const dayStr = `${targetMonth}-${day.toString().padStart(2, "0")}`;
         const dayDate = new Date(year, m - 1, day);
+        const dayName = dayDate.toLocaleDateString("en-US", { weekday: "short" });
         const isSunday = dayDate.getDay() === 0;
         const isPastOrToday = dayStr <= todayIST;
 
-        const dayLogs = dayMap[dayStr] || [];
+        const dayNewLogs = newDayMap[dayStr] || [];
+        const dayOldLogs = oldDayMap[dayStr] || [];
 
         // Check if on leave
         const hasLeave = empLeaves.some((l) => {
@@ -471,61 +540,198 @@ const getMonthlyAttendanceSummary = async (req, res) => {
 
         let dayMinutes = 0;
         let dayStatus = isSunday ? "Sunday" : "Absent";
-        let firstCheckIn = null;
-        let lastCheckOut = null;
+        let firstIn = "--:--";
+        let firstOut = "--:--";
+        let firstHours = 0;
+        let secondIn = "--:--";
+        let secondOut = "--:--";
+        let secondHours = 0;
+        let totalDayHours = 0;
+        let isHomeVisit = false;
+        let logCheckIn = "--:--";
+        let logCheckOut = "--:--";
+        let dayPlace = "";
+        let dayAddress = "";
 
-        if (dayLogs.length > 0) {
-          // Present or active
-          const hasLate = dayLogs.some((l) => l.status === "Late");
-          const hasHalfDay = dayLogs.some((l) => l.status === "Half Day");
-          const isCheckInOnly = dayLogs.some(
-            (l) => l.status === "Checked In" || (l.checkInTime && !l.checkOutTime)
+        if (dayNewLogs.length > 0) {
+          // Priority: New Attendance (Multi-shift)
+          const primaryLog = dayNewLogs[0];
+          dayPlace = primaryLog.place || "";
+          dayAddress = primaryLog.address || "";
+          isHomeVisit = Boolean(
+            (dayPlace && /home/i.test(dayPlace)) || (dayAddress && /home/i.test(dayAddress))
           );
 
-          dayStatus = hasHalfDay
-            ? "Half Day"
-            : hasLate
-              ? "Late"
-              : isCheckInOnly && isPastOrToday
-                ? "Checked In"
-                : "Present";
-          if (hasHalfDay) halfDays++;
-          else if (hasLate) lateDays++;
-          else presentDays++;
+          firstIn = primaryLog.firstinTime ? formatTimeIST(primaryLog.firstinTime) : "--:--";
+          firstOut = primaryLog.firstoutTime ? formatTimeIST(primaryLog.firstoutTime) : "--:--";
+          secondIn = primaryLog.secondinTime ? formatTimeIST(primaryLog.secondinTime) : "--:--";
+          secondOut = primaryLog.secondoutTime ? formatTimeIST(primaryLog.secondoutTime) : "--:--";
 
-          firstCheckIn = dayLogs[0].checkInTime;
-          lastCheckOut = dayLogs[dayLogs.length - 1].checkOutTime;
+          firstHours = primaryLog.firstworkingHours !== undefined && primaryLog.firstworkingHours !== null ? Number(primaryLog.firstworkingHours) : 0;
+          secondHours = primaryLog.secondworkingHours !== undefined && primaryLog.secondworkingHours !== null ? Number(primaryLog.secondworkingHours) : 0;
+          totalDayHours = primaryLog.workingHours !== undefined && primaryLog.workingHours !== null
+            ? Number(primaryLog.workingHours)
+            : (Math.max(0, firstHours) + Math.max(0, secondHours));
 
-          dayLogs.forEach((l) => {
-            const dur = getDurationMinutes(l.checkInTime, l.checkOutTime);
-            dayMinutes += dur;
-          });
+          totalFirstWorkHours += Math.max(0, firstHours);
+          totalSecondWorkHours += Math.max(0, secondHours);
 
+          const rawStatus = primaryLog.status || "Present";
+          const isCheckInOnly = rawStatus === "Checked In" || (primaryLog.firstinTime && !primaryLog.firstoutTime);
+          const isLate = rawStatus === "Late" || rawStatus === "Late Arrival";
+          const isEarly = rawStatus === "Early Exit";
+
+          if (isLate) {
+            morningLateDays++;
+            dayStatus = "Morning Late";
+          } else if (isEarly) {
+            earlyCheckOutDays++;
+            dayStatus = "Early Check Out";
+          } else if (rawStatus === "On Leave") {
+            onLeaveDays++;
+            dayStatus = "On Leave";
+          } else if (rawStatus === "Absent") {
+            absentDays++;
+            dayStatus = "Absent";
+          } else {
+            presentDays++;
+            dayStatus = isCheckInOnly && isPastOrToday ? "Checked In" : "Present";
+          }
+
+          if (isHomeVisit) {
+            homeVisitCount++;
+            homeVisits.push({
+              date: dayStr,
+              day: dayName,
+              place: dayPlace || "Home Visit",
+              address: dayAddress || "Patient Location",
+              checkIn: firstIn,
+              checkOut: secondOut !== "--:--" ? secondOut : firstOut,
+              hours: totalDayHours,
+            });
+          }
+
+          dayMinutes = Math.round(totalDayHours * 60);
+          if (dayMinutes === 0 && primaryLog.firstinTime && primaryLog.firstoutTime) {
+            dayMinutes = getDurationMinutes(firstIn, firstOut);
+          }
           totalWorkedMinutes += dayMinutes;
 
-          // Daily OT calculation: duration > 8 hours (480 minutes)
           const dailyOt = Math.max(0, dayMinutes - SHIFT_MINUTES);
           totalOtMinutes += dailyOt;
 
           dailyBreakdown.push({
             date: dayStr,
-            day: dayDate.toLocaleDateString("en-US", { weekday: "short" }),
+            day: dayName,
             status: dayStatus,
-            checkIn: firstCheckIn || "--:--",
-            checkOut: lastCheckOut || (isCheckInOnly ? "In Progress..." : "--:--"),
+            firstIn,
+            firstOut,
+            firstworkingHours: firstHours,
+            secondIn,
+            secondOut,
+            secondworkingHours: secondHours,
+            workingHours: totalDayHours,
+            checkIn: firstIn,
+            checkOut: secondOut !== "--:--" ? secondOut : (firstOut !== "--:--" ? firstOut : (isCheckInOnly ? "In Progress..." : "--:--")),
             durationMinutes: dayMinutes,
             durationFormatted: isCheckInOnly && dayMinutes === 0 ? "In Progress" : formatDuration(dayMinutes),
             otMinutes: dailyOt,
             otFormatted: formatDuration(dailyOt),
             isOvertime: dailyOt > 0,
+            isHomeVisit,
+            place: dayPlace,
+            address: dayAddress,
+          });
+        } else if (dayOldLogs.length > 0) {
+          // Fallback: Legacy Attendance logs
+          const hasLate = dayOldLogs.some((l) => l.status === "Late");
+          const hasEarly = dayOldLogs.some((l) => l.status === "Early Exit" || l.status === "Half Day");
+          const isCheckInOnly = dayOldLogs.some((l) => l.status === "Checked In" || (l.checkInTime && !l.checkOutTime));
+
+          isHomeVisit = dayOldLogs.some((l) => (l.place && /home/i.test(l.place)) || (l.address && /home/i.test(l.address)));
+          const homeLog = dayOldLogs.find((l) => (l.place && /home/i.test(l.place)) || (l.address && /home/i.test(l.address)));
+          if (homeLog) {
+            dayPlace = homeLog.place || "Home Visit";
+            dayAddress = homeLog.address || "";
+          }
+
+          if (hasLate) {
+            morningLateDays++;
+            dayStatus = "Morning Late";
+          } else if (hasEarly) {
+            earlyCheckOutDays++;
+            dayStatus = "Early Check Out";
+          } else {
+            presentDays++;
+            dayStatus = isCheckInOnly && isPastOrToday ? "Checked In" : "Present";
+          }
+
+          logCheckIn = formatTimeIST(dayOldLogs[0].checkInTime);
+          logCheckOut = formatTimeIST(dayOldLogs[dayOldLogs.length - 1].checkOutTime);
+
+          dayOldLogs.forEach((l) => {
+            const dur = getDurationMinutes(l.checkInTime, l.checkOutTime);
+            dayMinutes += dur;
+          });
+          totalWorkedMinutes += dayMinutes;
+
+          totalDayHours = parseFloat((dayMinutes / 60).toFixed(1));
+          firstHours = totalDayHours;
+          firstIn = logCheckIn;
+          firstOut = logCheckOut;
+
+          if (isHomeVisit) {
+            homeVisitCount++;
+            homeVisits.push({
+              date: dayStr,
+              day: dayName,
+              place: dayPlace || "Home Visit",
+              address: dayAddress || "Patient Location",
+              checkIn: logCheckIn,
+              checkOut: logCheckOut,
+              hours: totalDayHours,
+            });
+          }
+
+          const dailyOt = Math.max(0, dayMinutes - SHIFT_MINUTES);
+          totalOtMinutes += dailyOt;
+
+          dailyBreakdown.push({
+            date: dayStr,
+            day: dayName,
+            status: dayStatus,
+            firstIn,
+            firstOut,
+            firstworkingHours: firstHours,
+            secondIn: "--:--",
+            secondOut: "--:--",
+            secondworkingHours: 0,
+            workingHours: totalDayHours,
+            checkIn: logCheckIn || "--:--",
+            checkOut: logCheckOut || (isCheckInOnly ? "In Progress..." : "--:--"),
+            durationMinutes: dayMinutes,
+            durationFormatted: isCheckInOnly && dayMinutes === 0 ? "In Progress" : formatDuration(dayMinutes),
+            otMinutes: dailyOt,
+            otFormatted: formatDuration(dailyOt),
+            isOvertime: dailyOt > 0,
+            isHomeVisit,
+            place: dayPlace,
+            address: dayAddress,
           });
         } else if (hasLeave) {
           onLeaveDays++;
           dayStatus = "On Leave";
           dailyBreakdown.push({
             date: dayStr,
-            day: dayDate.toLocaleDateString("en-US", { weekday: "short" }),
+            day: dayName,
             status: "On Leave",
+            firstIn: "--:--",
+            firstOut: "--:--",
+            firstworkingHours: 0,
+            secondIn: "--:--",
+            secondOut: "--:--",
+            secondworkingHours: 0,
+            workingHours: 0,
             checkIn: "--:--",
             checkOut: "--:--",
             durationMinutes: 0,
@@ -533,13 +739,24 @@ const getMonthlyAttendanceSummary = async (req, res) => {
             otMinutes: 0,
             otFormatted: "0m",
             isOvertime: false,
+            isHomeVisit: false,
+            place: "",
+            address: "",
           });
         } else if (!isSunday && isPastOrToday) {
           absentDays++;
+          dayStatus = "Absent";
           dailyBreakdown.push({
             date: dayStr,
-            day: dayDate.toLocaleDateString("en-US", { weekday: "short" }),
+            day: dayName,
             status: "Absent",
+            firstIn: "--:--",
+            firstOut: "--:--",
+            firstworkingHours: 0,
+            secondIn: "--:--",
+            secondOut: "--:--",
+            secondworkingHours: 0,
+            workingHours: 0,
             checkIn: "--:--",
             checkOut: "--:--",
             durationMinutes: 0,
@@ -547,12 +764,23 @@ const getMonthlyAttendanceSummary = async (req, res) => {
             otMinutes: 0,
             otFormatted: "0m",
             isOvertime: false,
+            isHomeVisit: false,
+            place: "",
+            address: "",
           });
         } else {
+          dayStatus = isSunday ? "Sunday" : "Upcoming";
           dailyBreakdown.push({
             date: dayStr,
-            day: dayDate.toLocaleDateString("en-US", { weekday: "short" }),
-            status: isSunday ? "Sunday" : "Upcoming",
+            day: dayName,
+            status: dayStatus,
+            firstIn: "--:--",
+            firstOut: "--:--",
+            firstworkingHours: 0,
+            secondIn: "--:--",
+            secondOut: "--:--",
+            secondworkingHours: 0,
+            workingHours: 0,
             checkIn: "--:--",
             checkOut: "--:--",
             durationMinutes: 0,
@@ -560,17 +788,56 @@ const getMonthlyAttendanceSummary = async (req, res) => {
             otMinutes: 0,
             otFormatted: "0m",
             isOvertime: false,
+            isHomeVisit: false,
+            place: "",
+            address: "",
           });
         }
       }
 
-      const effectivePresent = presentDays + lateDays + halfDays * 0.5;
+      const totalAttended = presentDays + morningLateDays + earlyCheckOutDays;
       const attendanceRate =
         workingDaysCount > 0
-          ? Math.min(100, parseFloat(((effectivePresent / workingDaysCount) * 100).toFixed(1)))
+          ? Math.min(100, parseFloat(((totalAttended / workingDaysCount) * 100).toFixed(1)))
           : 0;
 
       const empName = [emp.firstName, emp.lastName].filter(Boolean).join(" ") || emp.name || emp.employeeId;
+
+      // Incorporate HomeVisit model records for this employee
+      const empHomeVisitModels = homeVisitRecords.filter((hv) => {
+        const hvEmpId = String(hv.employeeId || "").trim();
+        const hvEmpName = String(hv.employeeName || "").trim().toLowerCase();
+        const hvPatientName = String(hv.patientName || "").trim().toLowerCase();
+        const curName = String(empName).trim().toLowerCase();
+        return (
+          matchIds.includes(hvEmpId) ||
+          (curName && hvEmpName === curName) ||
+          (curName && hvPatientName === curName)
+        );
+      });
+
+      empHomeVisitModels.forEach((hv) => {
+        const hvDateStr = getISTDateString(new Date(hv.date));
+        const alreadyIn = homeVisits.some((h) => h.date === hvDateStr && (h.patientName === hv.patientName || h.diagnosis === hv.diagnosis));
+        if (!alreadyIn) {
+          homeVisitCount++;
+          homeVisits.push({
+            date: hvDateStr,
+            day: hv.day || new Date(hv.date).toLocaleDateString("en-US", { weekday: "short" }),
+            patientName: hv.patientName,
+            pain: hv.pain,
+            diagnosis: hv.diagnosis,
+            prescription: hv.prescription,
+            modalities: hv.modalities,
+            comments: hv.comments,
+            place: hv.place || "Home Visit",
+            address: hv.address || hv.diagnosis || "Home Visit",
+            checkIn: "--:--",
+            checkOut: "--:--",
+            hours: 0,
+          });
+        }
+      });
 
       return {
         _id: emp._id,
@@ -581,10 +848,16 @@ const getMonthlyAttendanceSummary = async (req, res) => {
         profilePhoto: emp.profilePhoto || null,
         workingDays: workingDaysCount,
         presentDays,
-        lateDays,
-        halfDays,
+        morningLateDays,
+        earlyCheckOutDays,
+        lateDays: morningLateDays, // backwards-compatible
+        halfDays: earlyCheckOutDays, // backwards-compatible
         absentDays,
         onLeaveDays,
+        homeVisitCount,
+        homeVisits,
+        firstworkingHours: parseFloat(totalFirstWorkHours.toFixed(1)),
+        secondworkingHours: parseFloat(totalSecondWorkHours.toFixed(1)),
         totalWorkedMinutes,
         totalWorkedHours: parseFloat((totalWorkedMinutes / 60).toFixed(1)),
         totalWorkedFormatted: formatDuration(totalWorkedMinutes),
@@ -597,7 +870,7 @@ const getMonthlyAttendanceSummary = async (req, res) => {
     });
 
     // Calculate aggregated stats across all employees
-    const totalPresentSum = employeeSummaries.reduce((acc, e) => acc + e.presentDays + e.lateDays, 0);
+    const totalPresentSum = employeeSummaries.reduce((acc, e) => acc + e.presentDays + e.morningLateDays + e.earlyCheckOutDays, 0);
     const totalOtMinutesSum = employeeSummaries.reduce((acc, e) => acc + e.totalOtMinutes, 0);
     const avgAttendanceRate =
       employeeSummaries.length > 0
@@ -632,7 +905,315 @@ const getMonthlyAttendanceSummary = async (req, res) => {
     });
   }
 };
+// ===============================
+// Late Check-In
+// ===============================
+const calculateLateCheckIn = (shiftTime, currentTime) => {
+  const [shiftHour, shiftMinute] = shiftTime.split(":").map(Number);
 
+  const shiftStart = new Date(currentTime);
+  shiftStart.setHours(shiftHour, shiftMinute, 0, 0);
+
+  const minutesLate = Math.floor(
+    (currentTime - shiftStart) / (1000 * 60)
+  );
+
+  // Within 15 minutes → Normal
+  if (minutesLate <= 15) {
+    return {
+      isLate: false,
+      workingHours: 0,
+      lateMinutes: 0,
+    };
+  }
+
+  const deduction = Math.ceil((minutesLate - 15) / 60);
+
+  return {
+    isLate: true,
+    workingHours: -deduction,
+    lateMinutes: minutesLate,
+  };
+};
+
+
+// ===============================
+// Early Check-Out
+// ===============================
+const calculateEarlyCheckOut = (shiftTime, currentTime) => {
+  const [shiftHour, shiftMinute] = shiftTime.split(":").map(Number);
+
+  const shiftEnd = new Date(currentTime);
+  shiftEnd.setHours(shiftHour, shiftMinute, 0, 0);
+
+  const minutesEarly = Math.floor(
+    (shiftEnd - currentTime) / (1000 * 60)
+  );
+
+  // Within 15 minutes early → Normal
+  if (minutesEarly <= 15) {
+    return {
+      isEarly: false,
+      workingHours: 0,
+      earlyMinutes: 0,
+    };
+  }
+
+  const deduction = Math.ceil((minutesEarly - 15) / 60);
+
+  return {
+    isEarly: true,
+    workingHours: -deduction,
+    earlyMinutes: minutesEarly,
+  };
+};
+
+
+const newAttendance = async (req, res) => {
+  try {
+    const { employee_ID, place, address } = req.body;
+
+    // Validate employee ID
+    if (!employee_ID) {
+      return res.status(400).json({
+        success: false,
+        message: "Employee ID is required",
+      });
+    }
+
+    // Check employee exists
+    const employee = await Employee.findOne({
+      $or: [
+        { employeeId: employee_ID },
+        ...(mongoose.Types.ObjectId.isValid(employee_ID) ? [{ _id: employee_ID }] : []),
+      ],
+    }).lean();
+
+    if (!employee) {
+      return res.status(404).json({
+        success: false,
+        message: "Employee not found",
+      });
+    }
+
+    // ===============================
+    // Get Today's Shift
+    // ===============================
+    const dayOfWeek = new Date().getDay();
+
+    const shifts = [
+      employee.sundayShift,
+      employee.mondayShift,
+      employee.tuesdayShift,
+      employee.wednesdayShift,
+      employee.thursdayShift,
+      employee.fridayShift,
+      employee.saturdayShift,
+    ];
+
+    const shiftData = shifts[dayOfWeek];
+
+    if (!shiftData) {
+      return res.status(400).json({
+        success: false,
+        message: "No shift assigned for today",
+      });
+    }
+
+    // ===============================
+    // Today's Date & Current Time
+    // ===============================
+    const today = new Date().toISOString().split("T")[0];
+    const currentTime = new Date();
+
+    console.log("current time ", currentTime);
+
+    // Find today's attendance
+    const empIdsToMatch = [employee_ID];
+    if (employee.employeeId) empIdsToMatch.push(employee.employeeId);
+    if (employee._id) empIdsToMatch.push(employee._id.toString());
+
+    let attendance = await NewAttendance.findOne({
+      employee_ID: { $in: [...new Set(empIdsToMatch)] },
+      date: today,
+    });
+
+    // ===============================
+    // 1. First Check-In
+    // ===============================
+    if (!attendance) {
+      const lateResult = calculateLateCheckIn(
+        shiftData.firstinTime,
+        currentTime
+      );
+
+      const initialLateDeduction = lateResult.isLate ? (lateResult.workingHours || 0) : 0;
+
+      attendance = await NewAttendance.create({
+        employee_ID,
+        date: today,
+        firstinTime: currentTime,
+        status: lateResult.isLate ? "Late" : "Checked In",
+        firstworkingHours: initialLateDeduction,
+        secondworkingHours: 0,
+        workingHours: initialLateDeduction,
+        place,
+        address,
+      });
+
+      return res.status(200).json({
+        success: true,
+        message: "Check In Successfully",
+        data: attendance,
+      });
+    }
+
+    // ===============================
+    // 2. First Check-Out
+    // ===============================
+    if (attendance.firstinTime && !attendance.firstoutTime) {
+      const earlyResult = calculateEarlyCheckOut(
+        shiftData.firstoutTime,
+        currentTime
+      );
+
+      const firstWorkHour = Number(shiftData.firstworkhour) || 0;
+
+      attendance.firstoutTime = currentTime;
+
+      // Base first shift working hours + any prior late deduction
+      let firstHours = (attendance.firstworkingHours || 0) + firstWorkHour;
+
+      // Apply early checkout deduction
+      if (earlyResult.isEarly) {
+        attendance.status = "Early Exit";
+        firstHours += (earlyResult.workingHours || 0);
+      } else {
+        if (attendance.status !== "Late") {
+          attendance.status = "Present";
+        }
+      }
+
+      attendance.firstworkingHours = firstHours;
+
+      // If firstworkingHours or secondworkingHours < 0, do not add negative to workingHours
+      const s1 = attendance.firstworkingHours > 0 ? attendance.firstworkingHours : 0;
+      const s2 = (attendance.secondworkingHours && attendance.secondworkingHours > 0) ? attendance.secondworkingHours : 0;
+      attendance.workingHours = s1 + s2;
+
+      await attendance.save();
+
+      return res.status(200).json({
+        success: true,
+        message: "Check Out Successfully",
+        data: attendance,
+      });
+    }
+
+    // ===============================
+    // 3. Second Check-In
+    // ===============================
+    if (
+      attendance.firstinTime &&
+      attendance.firstoutTime &&
+      !attendance.secondinTime
+    ) {
+      const lateResult = calculateLateCheckIn(
+        shiftData.secondinTime,
+        currentTime
+      );
+
+      attendance.secondinTime = currentTime;
+
+      if (lateResult.isLate) {
+        attendance.status = "Late";
+      } else {
+        attendance.status = "Checked In";
+      }
+
+      // Apply second check-in deduction to secondworkingHours
+      const secondLateDeduction = lateResult.isLate ? (lateResult.workingHours || 0) : 0;
+      attendance.secondworkingHours = (attendance.secondworkingHours || 0) + secondLateDeduction;
+
+      // If firstworkingHours or secondworkingHours < 0, do not add negative to workingHours
+      const s1 = (attendance.firstworkingHours && attendance.firstworkingHours > 0) ? attendance.firstworkingHours : 0;
+      const s2 = (attendance.secondworkingHours && attendance.secondworkingHours > 0) ? attendance.secondworkingHours : 0;
+      attendance.workingHours = s1 + s2;
+
+      await attendance.save();
+
+      return res.status(200).json({
+        success: true,
+        message: "Check In Successfully",
+        data: attendance,
+      });
+    }
+
+    // ===============================
+    // 4. Second Check-Out
+    // ===============================
+    if (
+      attendance.firstinTime &&
+      attendance.firstoutTime &&
+      attendance.secondinTime &&
+      !attendance.secondoutTime
+    ) {
+      const earlyResult = calculateEarlyCheckOut(
+        shiftData.secondoutTime,
+        currentTime
+      );
+
+      const secondWorkHour = Number(shiftData.secondworkhour) || 0;
+
+      attendance.secondoutTime = currentTime;
+
+      let secondHours = (attendance.secondworkingHours || 0) + secondWorkHour;
+
+      // Apply early checkout deduction
+      if (earlyResult.isEarly) {
+        attendance.status = "Early Exit";
+        secondHours += (earlyResult.workingHours || 0);
+      } else {
+        if (attendance.status !== "Late") {
+          attendance.status = "Present";
+        }
+      }
+
+      attendance.secondworkingHours = secondHours;
+
+      // If firstworkingHours or secondworkingHours < 0, do not add negative to workingHours
+      const s1 = (attendance.firstworkingHours && attendance.firstworkingHours > 0) ? attendance.firstworkingHours : 0;
+      const s2 = attendance.secondworkingHours > 0 ? attendance.secondworkingHours : 0;
+      attendance.workingHours = s1 + s2;
+
+      await attendance.save();
+
+      return res.status(200).json({
+        success: true,
+        message: "Check Out Successfully",
+        data: attendance,
+      });
+    }
+
+    // ===============================
+    // 5. Attendance Completed
+    // ===============================
+    return res.status(200).json({
+      success: false,
+      message: "Attendance Already Completed",
+      data: attendance,
+    });
+
+  } catch (error) {
+    console.error("Error in newAttendance:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Failed to record attendance",
+      error: error.message,
+    });
+  }
+};
 module.exports = {
   markAttendance,
   checkIn,
@@ -641,4 +1222,5 @@ module.exports = {
   getAttendanceByDate,
   getByDateAndEmploueeId,
   getMonthlyAttendanceSummary,
+  newAttendance
 };

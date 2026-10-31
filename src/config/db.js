@@ -154,9 +154,9 @@ const connectDB = async () => {
     "mongodb+srv://quantumsharqresource_db_user:hNMVM6lk65ickZlx@cluster0.ndm7dph.mongodb.net/ELroi-HRMS";
 
   try {
-    // Attempt Mongoose connection with a 3-second timeout
+    // Attempt Mongoose connection with a 10-second timeout
     await mongoose.connect(mongoUri, {
-      serverSelectionTimeoutMS: 3000,
+      serverSelectionTimeoutMS: 10000,
     });
     isConnected = true;
     useMock = false;
@@ -172,15 +172,27 @@ const connectDB = async () => {
 };
 
 const getModel = (name, schemaDefinition) => {
-  if (useMock) {
-    return new MockModel(name);
-  }
-  // Mongoose model fallback
+  const mock = new MockModel(name);
+  let mongooseModel = null;
   if (schemaDefinition instanceof mongoose.Schema) {
-    return mongoose.models[name] || mongoose.model(name, schemaDefinition);
+    mongooseModel = mongoose.models[name] || mongoose.model(name, schemaDefinition);
+  } else {
+    const schema = new mongoose.Schema(schemaDefinition, { timestamps: true });
+    mongooseModel = mongoose.models[name] || mongoose.model(name, schema);
   }
-  const schema = new mongoose.Schema(schemaDefinition, { timestamps: true });
-  return mongoose.models[name] || mongoose.model(name, schema);
+
+  return new Proxy(mongooseModel, {
+    get(target, prop) {
+      if (useMock || (!isConnected && mongoose.connection.readyState !== 1)) {
+        if (prop in mock) {
+          const val = mock[prop];
+          return typeof val === "function" ? val.bind(mock) : val;
+        }
+      }
+      const val = target[prop];
+      return typeof val === "function" ? val.bind(target) : val;
+    },
+  });
 };
 
 const port = "https://elroi.qsisphysio.com/api";

@@ -290,7 +290,16 @@ const EmployeeSchema = new mongoose.Schema(
         { leaveType: "Sick Leave", allowedDays: 0, takenLeaves: 0 },
         { leaveType: "Casual Leave", allowedDays: 0, takenLeaves: 0 }
       ]
-    }
+    },
+
+    mondayShift: { type: Object },
+    tuesdayShift: { type: Object },
+    wednesdayShift: { type: Object },
+    thursdayShift: { type: Object },
+    fridayShift: { type: Object },
+    saturdayShift: { type: Object },
+    sundayShift: { type: Object },
+
   },
   {
     timestamps: true,
@@ -323,4 +332,5 @@ EmployeeSchema.virtual("currentExperience").get(function () {
   return +(diff / (1000 * 60 * 60 * 24 * 365.25)).toFixed(1);
 });
 
-module.exports = getModel("Employee", EmployeeSchema);
+const Employee = getModel("Employee", EmployeeSchema);
+module.exports = Employee;

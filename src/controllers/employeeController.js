@@ -109,9 +109,18 @@ const parseJSONFields = (body) => {
     "education",
     "bankDetails",
     "leaveBalances",
+    "sundayShift",
+    "mondayShift",
+    "tuesdayShift",
+    "wednesdayShift",
+    "thursdayShift",
+    "fridayShift",
+    "saturdayShift",
   ];
   fields.forEach((field) => {
-    if (body[field] && typeof body[field] === "string") {
+    if (body[field] === "" || body[field] === "null") {
+      body[field] = null;
+    } else if (body[field] && typeof body[field] === "string") {
       try {
         body[field] = JSON.parse(body[field]);
       } catch (e) {
